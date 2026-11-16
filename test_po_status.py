@@ -126,7 +126,8 @@ class QuantityTests(unittest.TestCase):
         c = next(r for r in self.lark.t['cards'] if r['record_id'] == rid)
         self.assertEqual(c['fields']['Ordered Quantity'], 210)
 
-    def test_size_rows_updated_added_and_zeroed(self):
+    def test_size_rows_left_alone_quantity_still_updated(self):
+        """NetSuite -> Lark is quantity only: the team's size rows stay as they are."""
         rid = card(self.lark, self.key, 200, created=5_000)
         self.lark.clock = 5_001
         s = self.lark.create_record('variants', {'Size': 'S', 'Quantity': 40, 'Card': [rid]})['record_id']
@@ -134,7 +135,20 @@ class QuantityTests(unittest.TestCase):
         next(r for r in self.lark.t['cards'] if r['record_id'] == rid)['fields']['Variants'] = [s, xl]
         self.resave(sizes='S 50, M 60, L 60', quantity=170)
         v = {r['fields']['Size']: r['fields']['Quantity'] for r in self.lark.t['variants']}
-        self.assertEqual(v, {'S': 50, 'XL': 0, 'M': 60, 'L': 60})
+        self.assertEqual(v, {'S': 40, 'XL': 40})
+        self.assertEqual(next(r for r in self.lark.t['cards'] if r['record_id'] == rid)['fields']['Ordered Quantity'], 170)
+
+    def test_combined_card_changes_only_that_item(self):
+        """One card per PO: the changed item's row moves, and the card total moves by the difference."""
+        self.cards.review_config = {'b': {'variants': {'table': 'variants', 'identity': 'Line ID', 'size': 'Size',
+                                                          'quantity': 'Quantity', 'parent': 'Card'}}}
+        rid = card(self.lark, 'other-line', 500, created=5_000)
+        a = self.lark.create_record('variants', {'Line ID': self.key, 'Size': 'Chain 17.5"', 'Quantity': 200, 'Card': [rid]})['record_id']
+        b = self.lark.create_record('variants', {'Line ID': 'x2', 'Size': 'Chain 23.5"', 'Quantity': 300, 'Card': [rid]})['record_id']
+        update_card_quantity(self.cards, self.key, {'quantity': 250}, SINCE)
+        rows = {r['fields']['Size']: r['fields']['Quantity'] for r in self.lark.t['variants']}
+        self.assertEqual(rows, {'Chain 17.5"': 250, 'Chain 23.5"': 300})
+        self.assertEqual(next(r for r in self.lark.t['cards'] if r['record_id'] == rid)['fields']['Ordered Quantity'], 550)
 
 
 if __name__ == '__main__':
