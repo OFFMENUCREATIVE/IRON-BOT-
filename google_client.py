@@ -4,6 +4,7 @@ Google Calendar & Gmail client for Iron Bot.
 Uses a service account with domain-wide delegation to read
 Brendan's calendar events and flag important emails.
 """
+import ai_models
 
 import os
 import json
@@ -180,8 +181,7 @@ def filter_important_emails(emails, anthropic_client=None):
     email_text = "\n".join(email_summaries)
 
     try:
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+        response = ai_models.create(anthropic_client,
             max_tokens=1000,
             messages=[{
                 "role": "user",

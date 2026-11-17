@@ -26,9 +26,9 @@ app = Flask(__name__)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 BOT_NAME = os.environ.get("BOT_NAME", "Iron Bot")
-# The chat brain. Sonnet 4.6 is the high-quality + fast default; set BOT_MODEL=
-# claude-opus-4-8 for max quality (slower), or any other model id, with no code change.
-BOT_MODEL = os.environ.get("BOT_MODEL", "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
+# The AI model for every call lives in ai_models.py: set BOT_MODEL on Railway to
+# change it (unset = cheapest model). No code change needed.
+import ai_models
 # Live web search (Claude's native server-side tool). Set WEB_SEARCH=0 to disable.
 WEB_SEARCH_ENABLED = os.environ.get("WEB_SEARCH", "1").strip().lower() not in ("0", "false", "no", "")
 WEB_SEARCH_MAX_USES = int(os.environ.get("WEB_SEARCH_MAX_USES", "5") or "5")
@@ -1362,7 +1362,7 @@ def build_morning_digest(projects):
         lucy_summary = _person_summary("Lucy", person_projects.get("Lucy", []))
         summary_data = f"Overdue: {len(overdue)}, Due 7d: {len(due_7)}, Due 14d: {len(due_14)}, Waiting Art: {len(waiting_art)}\nBrendan: {brendan_summary}\nHannah: {hannah_summary}\nLucy: {lucy_summary}"
         prompt = f"Write a brief daily focus summary for the Off Menu production team. Address what Brendan, Hannah, and Lucy each need to focus on today. Flag anything urgent. Be direct, 3-5 sentences.\n\n{summary_data}"
-        resp = anthropic_client.messages.create(model="claude-sonnet-4-6", max_tokens=600, system="You are Iron Bot, Off Menu's production assistant.", messages=[{"role": "user", "content": prompt}])
+        resp = ai_models.create(anthropic_client, max_tokens=600, system="You are Iron Bot, Off Menu's production assistant.", messages=[{"role": "user", "content": prompt}])
         digest += f"\n\n**\ud83d\udcdd Daily Focus**\n{resp.content[0].text.strip()}"
     except Exception as e:
         logger.error(f"AI summary error: {e}")
@@ -1595,8 +1595,7 @@ RULES:
 
     try:
         prompt = re.sub(r"[\ud800-\udfff]", "", prompt)
-        resp = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
+        resp = ai_models.create(anthropic_client,
             max_tokens=3000,
             system="You are Iron Bot, Off Menu's production assistant. You summarize team messages across all channels and extract actionable items for Brendan, the founder. Be direct, concise, and prioritize what matters. Off Menu is a custom promotional products / manufacturing company.",
             messages=[{"role": "user", "content": prompt}],
@@ -1687,8 +1686,7 @@ RULES:
 {transcript}"""
             prompt = re.sub(r"[\ud800-\udfff]", "", prompt)
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-            resp = client.messages.create(
-                model="claude-sonnet-4-20250514",
+            resp = ai_models.create(client,
                 max_tokens=3000,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -2117,15 +2115,47 @@ def extract_question(msg):
     return clean if clean else raw_text
 
 
+# Only these card fields go to the AI (full cards are mostly formulas, links
+# and attachments it never needs). Values are clipped to keep messages small.
+CONTEXT_FIELDS = (
+    "PO Number", "Sales Order", "Product Name", "Products", "Description", "Customer", "Client Name",
+    "SO", "Vendor", "Status", "Order Type", "Quantity", "Assigned To",
+    "Ordered Quantity", "Quantity Shipped", "Remaining", "In-Hand Date", "Created Date",
+    "Date Shipped", "Tracking Number", "Carrier", "Project Managers", "Latest Production Update",
+)
+CONTEXT_VALUE_CHARS = 160
+
+ORDER_WORDS = re.compile(
+    r"\b(po|pos|so|sos|orders?|cards?|ship\w*|tracking|status|due|deadline|late|overdue|"
+    r"production|samples?|bulk|artwork|art|qty|quantity|quantities|client|customer|vendor|"
+    r"factory|in[- ]hand|boards?|projects?|units?|pending|confirmed|hold|cancel\w*|delivered)\b|"
+    r"\b(po|so)\s*-?\d", re.I)
+
+
+def needs_records(text, history=None, projects=()):
+    """True when the question (or the last thing asked) is about orders, so live
+    Lark cards are worth sending. "What's 2+2" gets none."""
+    recent = [text] + [m.get("content") for m in (history or [])[-2:] if m.get("role") == "user"]
+    blob = " ".join(t for t in recent if isinstance(t, str))
+    if ORDER_WORDS.search(blob):
+        return True
+    # A client/board name ("woof", "siegelman") also means it's about orders.
+    words = set(re.findall(r"[a-z0-9]{4,}", blob.lower()))
+    return any(w in words for p in projects for w in re.findall(r"[a-z0-9]{4,}", p.get("__table_name__", "").lower()))
+
+
 def build_context(projects):
     lines = [f"Today is {datetime.now(timezone.utc).strftime('%A %B %d %Y')}.", f"Total records: {len(projects)}", ""]
     for p in projects[:200]:
         tname = p.get("__table_name__", "Unknown")
         parts = [f"[Board: {tname}]"]
-        for key, val in p.items():
-            if key.startswith("__"):
-                continue
-            parts.append(f"{key}: {field_to_text(val)}")
+        for key in CONTEXT_FIELDS:
+            text = field_to_text(p.get(key)) if p.get(key) not in (None, "", []) else ""
+            if text:
+                text = " ".join(str(text).split())
+                if len(text) > CONTEXT_VALUE_CHARS:
+                    text = text[:CONTEXT_VALUE_CHARS] + "…"
+                parts.append(f"{key}: {text}")
         lines.append(" | ".join(parts))
     return "\n".join(lines)
 
@@ -2233,7 +2263,9 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id="", image_b6
         except Exception:  # noqa: BLE001
             _qvec = None
         qa_ctx = _qa_recall(scope, _qvec) if _qvec else ""
-        live = build_context(projects[:40])
+        # Live cards only when the question is about orders (saves tokens on everything else).
+        live = build_context(projects[:40]) if needs_records(user_text, chat_hist, projects) else (
+            f"Today is {datetime.now(timezone.utc).strftime('%A %B %d %Y')}.")
         _t_ctx = time.time()
         context = (kb + "\n\n--- LIVE RECORDS (snapshot) ---\n" + live).strip() if kb else live
         if qa_ctx:
@@ -2260,15 +2292,16 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id="", image_b6
             "in plain prose what you'll do and ask them to reply 'confirm' before proceeding; do NOT retry the tool. "
             "Use read tools freely to look things up, and never invent record_ids, table_ids, or user_ids \u2014 look them up first."
         )
-        user_message = f"--- LARK DATA ---\n{context}\n--- END ---\n\nQuestion: {user_text}"
+        # The Lark data block is cached, so the tool loop (up to 6 steps) re-reads
+        # it at the cache price instead of paying full price every step.
+        user_content = [
+            {"type": "text", "text": f"--- LARK DATA ---\n{context}\n--- END ---",
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": f"Question: {user_text}"},
+        ]
         if image_b64:
-            user_content = [
-                {"type": "image", "source": {"type": "base64",
-                 "media_type": image_media_type or "image/png", "data": image_b64}},
-                {"type": "text", "text": user_message},
-            ]
-        else:
-            user_content = user_message
+            user_content.insert(0, {"type": "image", "source": {"type": "base64",
+                                    "media_type": image_media_type or "image/png", "data": image_b64}})
         messages = (chat_hist or []) + [{"role": "user", "content": user_content}]
 
         # Prompt caching: the system prompt + tool definitions are identical on
@@ -2289,8 +2322,7 @@ def _process_message(user_text, chat_id, scope="brendan", sender_id="", image_b6
         _used_write = False
         for _ in range(6):
             _iters += 1
-            response = anthropic_client.messages.create(
-                model=BOT_MODEL,
+            response = ai_models.create(anthropic_client,
                 max_tokens=4096,
                 system=_sys_cached,
                 tools=_tools_cached,
