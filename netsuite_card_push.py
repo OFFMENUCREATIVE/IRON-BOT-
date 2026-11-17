@@ -27,12 +27,14 @@ log = logging.getLogger(__name__)
 # New production cards start here (single Status dropdown on every board).
 STATUS_FIELD = 'Status'
 STARTING_STATUS = 'Pending Artwork'
+ORDER_TYPE_FIELD = 'Order Type'
 
 # What the sender chose to put on the card, per line (NetSuite "Send POs to Lark").
 # address: auto = PO ship-to, else SO ship-to (the old behaviour)
 #          so / po = only that address; om = Off Menu's own address; none = no address
 ADDRESS_CHOICES = ('auto', 'so', 'po', 'om', 'none')
-PUSH_DEFAULTS = {'address': 'auto', 'sizes': True, 'description': True, 'units': True}
+PUSH_DEFAULTS = {'address': 'auto', 'sizes': True, 'description': True, 'units': True,
+                 'status': STARTING_STATUS, 'orderType': ''}
 OM_SHIP_TO_DEFAULT = 'Off Menu\n3495 N Dixie Highway\nBoca Raton, FL 33431'
 
 
@@ -52,6 +54,12 @@ def push_options(line):
         raise PushError('INVALID_PUSH_OPTIONS')
     if any(not isinstance(opts[k], bool) for k in ('sizes', 'description', 'units')):
         raise PushError('INVALID_PUSH_OPTIONS')
+    # Dropdown picks (Status, Order Type): checked against the board's options on create.
+    for k in ('status', 'orderType'):
+        if not isinstance(opts[k], str) or len(opts[k]) > 60 or not re.fullmatch(r"[\w &'/().,-]*", opts[k]):
+            raise PushError('INVALID_PUSH_OPTIONS')
+    if not opts['status']:
+        opts['status'] = STARTING_STATUS
     return opts
 
 
@@ -346,6 +354,40 @@ class LarkCards:
             return True
         return not names or name in names
 
+    def select_options(self, board, name):
+        """Option names of a dropdown column, or None when Lark can't be read.
+        An empty set means the board has no such dropdown."""
+        b = self.boards[board]
+        try:
+            fields = self.client.list_fields(b['table'], app_token=b['base']) or []
+        except Exception:
+            return None
+        if not fields:
+            return None
+        for x in fields:
+            if x.get('field_name') == name:
+                return {o.get('name') for o in ((x.get('property') or {}).get('options') or [])}
+        return set()
+
+    def dropdown_fields(self, board, opts):
+        """Status / Order Type picked on the send page. Only an option the board
+        already has is written (Lark would otherwise add a new option).
+        Returns (fields, notes, status_unchecked)."""
+        fields, notes, unchecked = {}, [], False
+        for name, value in ((STATUS_FIELD, opts['status']), (ORDER_TYPE_FIELD, opts['orderType'])):
+            if not value:
+                continue
+            options = self.select_options(board, name)
+            if options is None:
+                unchecked = unchecked or name == STATUS_FIELD
+                if name == ORDER_TYPE_FIELD:
+                    notes.append(f'{name} not set (board unreadable)')
+            elif value in options:
+                fields[name] = value
+            else:
+                notes.append(f'{name} "{value}" is not on this board')
+        return fields, notes, unchecked
+
     def product_field(self, board):
         """Card title column. Renamed in Lark from "Products" to "Product Name";
         accept either so the rename can happen board by board without downtime."""
@@ -479,6 +521,9 @@ class LarkCards:
         # Boards whose SO/Customer/Vendor formulas read the older "PO" link get it too.
         if f.get('po_link') and f['po_link'] != f['po_relation'] and self.has_field(board, f['po_link']):
             fields[f['po_link']] = [master['record_id']]
+        # Status and Order Type the sender picked (Status defaults to Pending Artwork).
+        picked, notes, status_unchecked = self.dropdown_fields(board, opts)
+        fields.update(picked)
         # Starting values for discovered boards (e.g. Status = Pending Artwork).
         for key, value in (b.get('initial_fields') or {}).items():
             fields.setdefault(key, value)
@@ -494,13 +539,16 @@ class LarkCards:
         # was removed). Boards set up in config have no initial_fields, so a new
         # card would start blank. Set Pending Artwork after creating; a board
         # without that field or option just keeps the card as created.
-        if 'initial_fields' not in b and STATUS_FIELD not in fields:
+        if status_unchecked and 'initial_fields' not in b and STATUS_FIELD not in fields:
             try:
                 self.client.update_record_fields(b['table'], result['record_id'],
-                                                 {STATUS_FIELD: STARTING_STATUS}, app_token=b['base'])
+                                                 {STATUS_FIELD: opts['status']}, app_token=b['base'])
             except Exception:
                 log.info('Starting status not set on %s %s', board, result['record_id'])
         result['sizes'] = self.add_sizes(board, result['record_id'], line) if opts['sizes'] else ''
+        result['cardStatus'] = fields.get(STATUS_FIELD, '')
+        result['orderType'] = fields.get(ORDER_TYPE_FIELD, '')
+        result['notes'] = notes
         return result
 
     def address_fields(self, cfg, line, master, choice):
@@ -656,7 +704,14 @@ def process(line, ledger, cards):
     out = {'identity': key, 'status': 'Created', 'addressStatus': address_status(line), 'url': cards.url(board, result['record_id'])}
     if result.get('sizes'):
         out['sizesStatus'] = result['sizes']
+    out.update(dropdown_report(result))
     return out
+
+
+def dropdown_report(result):
+    """What the send page shows for Status / Order Type on a new card."""
+    return {'cardStatus': result.get('cardStatus', ''), 'orderType': result.get('orderType', ''),
+            'notes': list(result.get('notes') or [])}
 
 
 def validate_status_payload(payload, account):
