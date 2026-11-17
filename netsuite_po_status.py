@@ -123,23 +123,34 @@ def line_changed(old_fields, new_line):
 
 
 def update_card_quantity(cards, key, new_line, since_ms, po_number=None, po_line_rid=None, single_line=False):
-    """Push a changed NetSuite quantity to the production card(s) for this PO line. One way: NetSuite -> Lark.
+    """Push a changed NetSuite quantity to Lark. One way, NetSuite -> Lark, and QUANTITY ONLY.
 
-    Cards carrying the line ID get the new quantity whatever their age. Size rows are
-    only rebuilt on cards made after the cutoff (older size rows were typed by hand).
+    - A card for just this line: its Ordered Quantity is set.
+    - A combined card (one card per PO, or grouped sizes): only this item's row changes,
+      and the card total moves by the difference.
+    Size rows, names, descriptions and anything else the team edits in Lark are never touched.
     A hand-made card without the line ID is matched through its PO, then stamped with
-    the line ID so later changes go straight to it."""
+    the line ID so later changes go straight to it. (since_ms is kept for callers.)"""
     updated = 0
     for board, b in cards.boards.items():
+        v = (cards.review_config.get(board) or {}).get('variants') or {}
+        rows_in_group = []
+        if v.get('table') and v.get('identity'):
+            try:
+                rows_in_group = cards.search(b['base'], v['table'], v['identity'], key)
+            except PushError:
+                rows_in_group = []
+        if rows_in_group:
+            for item in rows_in_group:
+                if _set_item_quantity(cards, b, v, item, new_line.get('quantity')):
+                    updated += 1
+            continue
         try:
             rows = cards.search(b['base'], b['table'], b['fields']['identity'], key)
         except PushError:
             continue
         for row in rows:
             _set_quantity(cards, b, row['record_id'], new_line)
-            created = _created(row)
-            if (created and created > since_ms) or (created == 0 and _is_new(cards, b, row['record_id'], since_ms)):
-                _update_sizes(cards, board, row, new_line)
             updated += 1
     if updated or not po_number:
         return updated
@@ -148,6 +159,26 @@ def update_card_quantity(cards, key, new_line, since_ms, po_number=None, po_line
         log.info('Linked hand-made card %s on %s to %s and set quantity', row['record_id'], board, key)
         updated += 1
     return updated
+
+
+def _set_item_quantity(cards, b, v, item, quantity):
+    """One item row on a combined card: set its quantity and move the card total by the change."""
+    if quantity is None:
+        return False
+    fields = item.get('fields') or {}
+    old = _qty(fields.get(v['quantity']))
+    if old == quantity:
+        return True
+    cards.client.update_record_fields(v['table'], item['record_id'], {v['quantity']: quantity}, app_token=b['base'])
+    qfield = b['fields']['quantity']
+    for parent in _relation_ids(fields.get(v['parent'])):
+        r = cards.client._get(f"/open-apis/bitable/v1/apps/{b['base']}/tables/{b['table']}/records/{parent}")
+        if r.get('code') != 0:
+            continue
+        total = _qty(r['data']['record'].get('fields', {}).get(qfield))
+        if isinstance(total, (int, float)) and isinstance(old, (int, float)):
+            cards.client.update_record_fields(b['table'], parent, {qfield: total - old + quantity}, app_token=b['base'])
+    return True
 
 
 def _created(row):
