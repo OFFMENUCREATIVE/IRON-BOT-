@@ -400,8 +400,9 @@ class ReviewService:
             for line, vid in created:
                 self.store.save(cur, line['identity'], board, rid, line, vid, actor)
                 cur.execute('UPDATE om_ns_card_push SET record_id=%s,completed_at=now() WHERE identity=%s AND record_id IS NULL', (rid, line['identity']))
-        from netsuite_card_push import so_address_status
-        return [{'identity': k, 'status': 'Created PO card' if whole_po else 'Created variant card', 'addressStatus':so_address_status(lines[0]), 'url': self.cards.url(board, rid)} for k in keys]
+        from netsuite_card_push import so_address_status, dropdown_report
+        extra = dropdown_report(record)
+        return [dict({'identity': k, 'status': 'Created PO card' if whole_po else 'Created variant card', 'addressStatus':so_address_status(lines[0]), 'url': self.cards.url(board, rid)}, **extra) for k in keys]
 
 
 def register_routes(app, service, authorize):
