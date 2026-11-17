@@ -1,6 +1,7 @@
 # v4.20 - fix garbled unicode in person summary card title + emoji check + redeploy trigger
 import os
 import logging
+import sys
 import json
 import re
 import time
@@ -20,7 +21,20 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from google_client import get_todays_meetings, get_recent_emails, filter_important_emails
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+# Railway labels anything on stderr as an error. Normal logs go to stdout so
+# only real warnings/errors show up red.
+def _log_handlers():
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    out = logging.StreamHandler(sys.stdout)
+    out.addFilter(lambda r: r.levelno < logging.WARNING)
+    err = logging.StreamHandler(sys.stderr)
+    err.setLevel(logging.WARNING)
+    for h in (out, err):
+        h.setFormatter(fmt)
+    return [out, err]
+
+
+logging.basicConfig(level=logging.INFO, handlers=_log_handlers())
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
