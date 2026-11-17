@@ -184,6 +184,8 @@ class BoardRegistry:
         base, catalog_table = self.catalog['base'], self.catalog['table']
         variants_table = self.variants_table()
         tables = _paged(self.client, f'/open-apis/bitable/v1/apps/{base}/tables')
+        # Lark returns tables in sidebar order; the NetSuite dropdown follows it.
+        self.order = {t.get('table_id'): i for i, t in enumerate(tables)}
         configured = {b['table'] for b in self.boards.values()}
         variant_fields = {f['field_name']: f for f in
                           _paged(self.client, f'/open-apis/bitable/v1/apps/{base}/tables/{variants_table}/fields')}
@@ -245,7 +247,10 @@ class BoardRegistry:
             if key not in self.review_config or self.exclude.search(board.get('label') or key):
                 continue
             rows.append({'key': key, 'label': board.get('label') or key, 'discovered': bool(board.get('discovered'))})
-        return sorted(rows, key=lambda r: (r['discovered'], r['label'].casefold()))
+        # Same order as the Lark sidebar; boards Lark hasn't listed yet go last, A-Z.
+        order = getattr(self, 'order', {}) or {}
+        tables = {key: board.get('table', key) for key, board in self.boards.items()}
+        return sorted(rows, key=lambda r: (order.get(tables.get(r['key']), len(order)), r['label'].casefold()))
 
 
 def reconcile_configured_boards(client, catalog, boards, review_config=None, address_config=None):

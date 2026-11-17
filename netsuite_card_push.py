@@ -60,6 +60,9 @@ def push_options(line):
             raise PushError('INVALID_PUSH_OPTIONS')
     if not opts['status']:
         opts['status'] = STARTING_STATUS
+    # 'none' = the sender chose to leave the dropdown blank on the card.
+    if opts['orderType'] == 'none':
+        opts['orderType'] = ''
     return opts
 
 
@@ -375,7 +378,7 @@ class LarkCards:
         Returns (fields, notes, status_unchecked)."""
         fields, notes, unchecked = {}, [], False
         for name, value in ((STATUS_FIELD, opts['status']), (ORDER_TYPE_FIELD, opts['orderType'])):
-            if not value:
+            if not value or value == 'none':
                 continue
             options = self.select_options(board, name)
             if options is None:
@@ -526,6 +529,8 @@ class LarkCards:
         fields.update(picked)
         # Starting values for discovered boards (e.g. Status = Pending Artwork).
         for key, value in (b.get('initial_fields') or {}).items():
+            if key == STATUS_FIELD and opts['status'] == 'none':
+                continue  # Sender chose no status.
             fields.setdefault(key, value)
         cfg = self.address_config.get(board)
         if cfg:
@@ -539,7 +544,7 @@ class LarkCards:
         # was removed). Boards set up in config have no initial_fields, so a new
         # card would start blank. Set Pending Artwork after creating; a board
         # without that field or option just keeps the card as created.
-        if status_unchecked and 'initial_fields' not in b and STATUS_FIELD not in fields:
+        if status_unchecked and opts['status'] != 'none' and 'initial_fields' not in b and STATUS_FIELD not in fields:
             try:
                 self.client.update_record_fields(b['table'], result['record_id'],
                                                  {STATUS_FIELD: opts['status']}, app_token=b['base'])
