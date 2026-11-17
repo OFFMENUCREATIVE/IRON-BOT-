@@ -209,6 +209,10 @@ class CardFiller:
         return True
 
     def _fill_address(self, board, row, master_fields, update=None):
+        # Addresses change, so a card only gets one when someone pushes it from NetSuite
+        # (Send POs to Lark, or the address button). Set OM_CARD_FILL_ADDRESS=1 to auto-fill again.
+        if os.environ.get('OM_CARD_FILL_ADDRESS', '').strip().lower() not in ('1', 'true', 'yes'):
+            return
         cfg = self.cards.address_config.get(board)
         if not cfg:
             return
