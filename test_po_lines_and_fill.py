@@ -69,7 +69,7 @@ class FillTests(unittest.TestCase):
         rid=self.card();self.f.run_once();c=self.get(rid)
         self.assertEqual(c['Products'],'Heavyweight Logo Hoodie – Black')
         self.assertEqual((c['Description'],c['Ordered Quantity'],c['Unit']),('400gsm fleece',200,'Each'))
-        self.assertEqual(c['Address'],'Robert Johnson\nGlendora CA')
+        self.assertNotIn('Address',c)  # addresses are only pushed by hand now
         self.assertEqual(c['Key'],'1:purchaseorder:37358:101')
         self.assertEqual([(v['fields']['Size'],v['fields']['Quantity']) for v in self.lark.t['variants']],[('S',40),('M',60),('L',60),('XL',40)])
         self.assertIn('link',self.lark.t[PO_LINES_TABLE][0]['fields']['Card'])
@@ -81,10 +81,18 @@ class FillTests(unittest.TestCase):
         self.assertEqual((c['Products'],c['Address']),('My name','Off Menu\nBoynton'))
         c['Description']='edited';self.f.run_once()
         self.assertEqual(self.get(rid)['Description'],'edited')
-    def test_extra_card_beyond_lines_gets_address_and_note(self):
+    def test_extra_card_beyond_lines_gets_note_but_no_address(self):
         self.card();self.card();x=self.card();self.f.run_once();c=self.get(x)
-        self.assertIn('already have cards',c['Sync issue']);self.assertEqual(c['Address'],'Robert Johnson\nGlendora CA')
+        self.assertIn('already have cards',c['Sync issue']);self.assertNotIn('Address',c)
         self.assertNotIn('Products',c)
+    def test_address_auto_fill_only_when_switched_on(self):
+        import os
+        os.environ['OM_CARD_FILL_ADDRESS']='1'
+        try:
+            rid=self.card();self.f.run_once()
+            self.assertEqual(self.get(rid)['Address'],'Robert Johnson\nGlendora CA')
+        finally:
+            del os.environ['OM_CARD_FILL_ADDRESS']
     def test_card_from_send_to_lark_is_not_refilled(self):
         rid=self.card(Key='1:purchaseorder:37358:101',Products='From button');self.f.run_once()
         self.assertEqual(self.get(rid)['Products'],'From button')
