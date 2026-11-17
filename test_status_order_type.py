@@ -72,3 +72,30 @@ class StatusOrderTypeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NoStatusTests(unittest.TestCase):
+    def test_no_status_leaves_card_blank(self):
+        c = Client(); k = cards(c); k.boards['test']['initial_fields'] = {'Status': 'Pending Artwork'}
+        result = k.create('test', line(status='none', orderType='none'))
+        self.assertNotIn('Status', c.created[0]); self.assertNotIn('Order Type', c.created[0])
+        self.assertEqual(c.updated, []); self.assertEqual(result['notes'], [])
+
+    def test_no_status_when_board_unreadable_is_not_set_later(self):
+        class Blind(Client):
+            def list_fields(self, *a, **k): raise RuntimeError
+        c = Blind(); cards(c).create('test', line(status='none'))
+        self.assertEqual(c.updated, [])
+
+
+class BoardOrderTests(unittest.TestCase):
+    def test_listing_follows_lark_sidebar(self):
+        from netsuite_board_discovery import BoardRegistry
+        reg = BoardRegistry.__new__(BoardRegistry)
+        import re as _re
+        reg.exclude = _re.compile(r'(?!)')
+        reg.boards = {'wb': {'table': 'tblB', 'label': 'Workshop Bulk'}, 'tblA': {'table': 'tblA', 'label': 'Workshop Samples', 'discovered': True},
+                      'z': {'table': 'tblZ', 'label': 'Alpha'}, 'new': {'table': 'tblN', 'label': 'Brand New'}}
+        reg.review_config = {k: {} for k in reg.boards}
+        reg.order = {'tblA': 0, 'tblB': 1, 'tblZ': 2}
+        self.assertEqual([r['label'] for r in reg.listing()], ['Workshop Samples', 'Workshop Bulk', 'Alpha', 'Brand New'])
