@@ -70,7 +70,7 @@ class TicketTaskTests(unittest.TestCase):
         t = TicketTasks(FakeLark([]))
         found = t.discover(force=True)
         self.assertEqual(list(found), [PU])
-        self.assertEqual(found[PU], {'card_table': CARD, 'board': '7 Brew Coffee'})
+        self.assertEqual((found[PU]['card_table'], found[PU]['board'], found[PU]['task']), (CARD, '7 Brew Coffee', 'Task ID'))
 
     def test_creates_task_for_new_ticket_and_stores_id(self):
         lark = FakeLark([row('r1', Type='Approval', Details='Approve mockup',
@@ -135,6 +135,60 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(TicketTasks(lark, 'base').discover(force=True), {})
         finally:
             FIELDS[:] = old
+
+SHARED = 'tblUA'
+SHARED_FIELDS = [{'field_name': n} for n in ('Type', 'Done', 'Assigned to', 'Message', 'Requested by', 'Board')] + \
+    [{'field_name': 'Lark Task ID', 'type': 1},
+     {'field_name': 'Woof', 'type': 21, 'property': {'table_id': 'tblWOOF'}},
+     {'field_name': 'Workshop Bulk', 'type': 21, 'property': {'table_id': 'tblWB'}}]
+
+
+class SharedLark(FakeLark):
+    def _paginate(self, path, params=None):
+        return [{'table_id': SHARED, 'name': 'Updates & Approvals'}]
+
+    def list_fields(self, table_id, app_token=None):
+        return SHARED_FIELDS
+
+    def get_record(self, table_id, record_id, app_token=None):
+        self.read_from = (table_id, record_id)
+        return {'fields': self.card}
+
+
+class SharedTableTests(unittest.TestCase):
+    def rows(self):
+        return [{'record_id': 'recT', 'fields': {
+            'Type': 'Approval', 'Message': 'Please send fixed design', 'Assigned to': [{'id': 'ou_hannah'}],
+            'Requested by': [{'id': 'ou_brendan'}], 'PO Number': 'PO6890',
+            'Woof': [{'record_ids': None, 'table_id': 'tblWOOF', 'text': None}],
+            'Workshop Bulk': [{'record_ids': ['recCardWB'], 'table_id': 'tblWB', 'text': 'PO6890'}]}}]
+
+    def test_task_made_for_the_linked_board_card(self):
+        lark = SharedLark(self.rows()); t = TicketTasks(lark)
+        stats = t.run_once()
+        self.assertEqual(stats['created'], 1)
+        task = lark.tasks['task1']
+        self.assertTrue(task['summary'].startswith('Approval: Please send fixed design — Workshop Bulk'))
+        self.assertEqual(task['members'][0]['id'], 'ou_hannah')
+        self.assertIn('table=tblWB&record=recCardWB', task['description'])
+        self.assertEqual(lark.updates[-1], ('recT', {'Lark Task ID': 'task1'}))
+        self.assertEqual(lark.read_from, ('tblWB', 'recCardWB'))
+
+    def test_done_both_ways_and_raiser_told(self):
+        lark = SharedLark(self.rows()); t = TicketTasks(lark)
+        t.run_once(); t.run_once()
+        self.assertEqual(len(lark.tasks), 1)  # no duplicate task on the next poll
+        lark.tasks['task1']['completed_at'] = '123'
+        t.run_once()
+        self.assertTrue(lark.rows[0]['fields']['Done'])
+        self.assertEqual(lark.messages[0][0], 'ou_brendan')
+
+    def test_missing_task_column_is_skipped(self):
+        class NoCol(SharedLark):
+            def list_fields(self, table_id, app_token=None):
+                return [f for f in SHARED_FIELDS if f['field_name'] != 'Lark Task ID']
+        self.assertEqual(TicketTasks(NoCol([])).discover(force=True), {})
+
 
 if __name__ == '__main__':
     unittest.main()

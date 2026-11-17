@@ -1,6 +1,8 @@
 """Production Updates tickets -> Lark Tasks.
 
-Each board has a "<Board> — Production Updates" table. An entry whose Type is
+All boards now share one "Updates & Approvals" table (Message / Requested by /
+one link column per board / Lark Task ID). Older bases had a
+"<Board> — Production Updates" table per board; both shapes are supported. An entry whose Type is
 anything other than "Update" (Approval / Question / Problem) is a ticket.
 
 Every few minutes this module:
@@ -25,6 +27,12 @@ BASE = os.environ.get('OM_TICKET_BASE', 'VcAlbwImaab1KlsFLBVjunTNp1c')
 DOMAIN = os.environ.get('LARK_TENANT_DOMAIN', 'off-menu.jp.larksuite.com')
 TABLE_SUFFIX = 'Production Updates'
 REQUIRED = ('Type', 'Done', 'Assigned to', 'Details', 'Order Item', 'Task ID')
+SHARED_TABLE = os.environ.get('OM_TICKET_TABLE_NAME', 'Updates & Approvals')
+SHARED_REQUIRED = ('Type', 'Done', 'Assigned to', 'Message', 'Lark Task ID')
+LINK_TYPES = (18, 21)
+# Field names per table shape.
+PER_BOARD = {'details': 'Details', 'owner': 'Owner', 'task': 'Task ID'}
+SHARED = {'details': 'Message', 'owner': 'Requested by', 'task': 'Lark Task ID'}
 NOT_A_TICKET = ('', 'Update')
 DISCOVER_EVERY = 1800  # seconds
 
@@ -76,9 +84,9 @@ def card_url(card_table, card_id):
     return f'https://{DOMAIN}/base/{BASE}?table={card_table}&record={card_id}'
 
 
-def summary_for(fields, board, po):
+def summary_for(fields, board, po, details='Details'):
     kind = text(fields.get('Type')).strip()
-    what = ' '.join(text(fields.get('Details')).split())[:90] or '(see card)'
+    what = ' '.join(text(fields.get(details)).split())[:90] or '(see card)'
     tail = ' — '.join(x for x in (board, po) if x)
     return f'{kind}: {what}' + (f' — {tail}' if tail else '')
 
@@ -96,7 +104,12 @@ class TicketTasks:
         found = {}
         tables = self.client._paginate(f'/open-apis/bitable/v1/apps/{self.base}/tables')
         for t in tables:
-            name = t.get('name') or ''
+            name = (t.get('name') or '').strip()
+            if name == SHARED_TABLE:
+                info = self._shared_info(t['table_id'], name)
+                if info:
+                    found[t['table_id']] = info
+                continue
             if not name.endswith(TABLE_SUFFIX):
                 continue
             try:
@@ -115,10 +128,31 @@ class TicketTasks:
             if not card_table:
                 continue
             board = name[:-len(TABLE_SUFFIX)].rstrip(' —-').strip()
-            found[t['table_id']] = {'card_table': card_table, 'board': board}
+            found[t['table_id']] = dict(PER_BOARD, card_table=card_table, board=board)
         self.tables, self._discovered_at = found, time.time()
-        log.info('Ticket tasks: watching %d Production Updates tables', len(found))
+        log.info('Ticket tasks: watching %d table(s): %s', len(found), ', '.join(sorted(
+            i.get('board') or SHARED_TABLE for i in found.values())) or 'none')
         return found
+
+    def _shared_info(self, table_id, name):
+        """The shared table: one link column per board, each pointing at that board's cards."""
+        try:
+            fields = {f.get('field_name'): f for f in self.client.list_fields(table_id, app_token=self.base)}
+        except Exception as e:
+            log.warning('Ticket tasks: cannot read fields of %s: %s', name, e)
+            return None
+        missing = [k for k in SHARED_REQUIRED if k not in fields]
+        if missing:
+            log.warning('Ticket tasks: %s is missing %s', name, ', '.join(missing))
+            return None
+        if fields['Lark Task ID'].get('type') != 1:
+            log.warning('Ticket tasks: skipping %s, its Lark Task ID field is not a text field', name)
+            return None
+        links = {n: (f.get('property') or {}).get('table_id') for n, f in fields.items()
+                 if f.get('type') in LINK_TYPES and (f.get('property') or {}).get('table_id')}
+        if not links:
+            return None
+        return dict(SHARED, links=links, board='')
 
     # ---------- one pass ----------
     def run_once(self):
@@ -128,14 +162,14 @@ class TicketTasks:
                 rows = self.client.get_table_records(pu, app_token=self.base)
             except Exception as e:
                 stats['errors'] += 1
-                log.warning('Ticket tasks: cannot read %s: %s', info['board'], e)
+                log.warning('Ticket tasks: cannot read %s: %s', info['board'] or SHARED_TABLE, e)
                 continue
             for r in rows:
                 try:
                     self._handle(pu, info, r, stats)
                 except Exception as e:
                     stats['errors'] += 1
-                    log.warning('Ticket tasks: %s %s failed: %s', info['board'], r.get('record_id'), e)
+                    log.warning('Ticket tasks: %s %s failed: %s', info['board'] or SHARED_TABLE, r.get('record_id'), e)
         if any(stats.values()):
             log.info('Ticket tasks: %s', stats)
         return stats
@@ -145,7 +179,7 @@ class TicketTasks:
         if not is_ticket(f):
             return
         rid = rec['record_id']
-        task_id = text(f.get('Task ID')).strip()
+        task_id = text(f.get(info['task'])).strip()
         done = bool(f.get('Done'))
         if not task_id:
             if done:
@@ -165,34 +199,45 @@ class TicketTasks:
             stats['ticked_done'] += 1
             self._tell_raiser(info, f, task)
 
+    @staticmethod
+    def card_of(info, f):
+        """(card_table, card_id, board name) the ticket belongs to."""
+        if 'links' not in info:
+            cards = linked_ids(f.get('Order Item'))
+            return info['card_table'], (cards[0] if cards else ''), info['board']
+        for name, table in info['links'].items():
+            cards = linked_ids(f.get(name))
+            if cards:
+                return table, cards[0], name
+        return '', '', text(f.get('Board')).strip()
+
     # ---------- actions ----------
     def _create(self, pu, info, rid, f):
-        cards = linked_ids(f.get('Order Item'))
-        card_id = cards[0] if cards else ''
+        card_table, card_id, board = self.card_of(info, f)
         card = {}
         if card_id:
             try:
-                card = self.client.get_record(info['card_table'], card_id, app_token=self.base).get('fields') or {}
+                card = self.client.get_record(card_table, card_id, app_token=self.base).get('fields') or {}
             except Exception:
                 card = {}
-        po = text(card.get('PO Number')) or text(card.get('Project Card Title'))
+        po = text(card.get('PO Number')) or text(card.get('Project Card Title')) or text(f.get('PO Number'))
         assignees = user_ids(f.get('Assigned to')) or user_ids(card.get('Project Managers'))
-        link = card_url(info['card_table'], card_id) if card_id else ''
+        link = card_url(card_table, card_id) if card_id else ''
         desc = '\n'.join(x for x in (
-            ' '.join(text(f.get('Details')).split()),
+            ' '.join(text(f.get(info['details'])).split()),
             f'Open the card: {link}' if link else '',
             'Tick Done on the card or complete this task — both stay in sync.',
         ) if x)
-        task = self.create_task(summary_for(f, info['board'], po), desc, assignees)
+        task = self.create_task(summary_for(f, board, po, info['details']), desc, assignees)
         guid = task.get('guid') or task.get('id') or ''
         if not guid:
             raise RuntimeError('task create returned no id')
-        self.client.update_record_fields(pu, rid, {'Task ID': guid}, app_token=self.base)
+        self.client.update_record_fields(pu, rid, {info['task']: guid}, app_token=self.base)
 
     def _tell_raiser(self, info, f, task):
         if not self.notify:
             return
-        raiser = user_ids(f.get('Owner'))
+        raiser = user_ids(f.get(info['owner']))
         if not raiser:
             return
         who = ', '.join(text(m.get('name')) for m in task.get('members') or [] if m.get('role') == 'assignee')
