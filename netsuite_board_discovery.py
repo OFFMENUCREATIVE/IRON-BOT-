@@ -44,7 +44,7 @@ REVIEW_FIELDS = {
     'review_url': (_named('Review NetSuite changes'), (URL,)),
 }
 ADDRESS_FIELDS = {
-    'address': (('Address',), (TEXT,)),
+    'address': (('Shipping Address', 'Address'), (TEXT,)),
     'source': (('Address source',), (URL,)),
     'copied_at': (('Address copied at',), (DATE,)),
 }
