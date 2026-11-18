@@ -881,14 +881,60 @@ def _drop_deleted_boards(client, boards):
         if not isinstance(board, dict) or not board.get('base') or not board.get('table'):
             continue
         try:
+            # Same first-page read the reconcile pass makes, so a startup cache serves both.
             r = client._get(f"/open-apis/bitable/v1/apps/{board['base']}/tables/{board['table']}/fields",
-                            params={'page_size': 1})
+                            params={'page_size': 100})
         except Exception as error:
             log.warning('Board check skipped for %s: %s', key, type(error).__name__)
             continue
         if isinstance(r, dict) and r.get('code') == TABLE_NOT_FOUND:
             log.warning('Board %s dropped: its Lark table no longer exists', key)
             del boards[key]
+
+
+class _StartupSchemaCache:
+    """Startup-only wrapper around the Lark client that reads each board's field
+    list once. register() runs before the web server starts listening, and the
+    board check plus three reconcile passes used to re-read all ~26 boards each
+    time (~2 minutes), so any NetSuite call during a restart got a 502. Only
+    successful or table-not-found answers are kept; a failed read is retried."""
+
+    def __init__(self, client, workers=4):
+        self._client = client
+        self._workers = workers
+        self._memo = {}
+        self._lock = threading.Lock()
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def _get(self, path, params=None, **kwargs):
+        if kwargs or not path.endswith('/fields'):
+            return self._client._get(path, params=params, **kwargs)
+        key = (path, tuple(sorted((params or {}).items())))
+        with self._lock:
+            if key in self._memo:
+                return self._memo[key]
+        response = self._client._get(path, params=params)
+        if isinstance(response, dict) and response.get('code') in (0, TABLE_NOT_FOUND):
+            with self._lock:
+                self._memo[key] = response
+        return response
+
+    def prefetch(self, boards):
+        """Read every board's schema a few at a time (gentle on Lark rate limits)."""
+        from concurrent.futures import ThreadPoolExecutor
+        paths = {f"/open-apis/bitable/v1/apps/{b['base']}/tables/{b['table']}/fields"
+                 for b in boards.values() if isinstance(b, dict) and b.get('base') and b.get('table')}
+
+        def read(path):
+            try:
+                self._get(path, params={'page_size': 100})
+            except Exception:
+                pass  # the real pass reads it again and handles the error
+
+        with ThreadPoolExecutor(max_workers=self._workers) as pool:
+            list(pool.map(read, paths))
 
 
 def _reconcile(client, catalog, boards, review_config=None, address_config=None):
@@ -927,11 +973,13 @@ def register(app):
             raise PushError('INVALID_CONFIGURATION')
         # Instantiate bot credentials directly; never a client patched to act as a user.
         client = LarkClient()
-        _drop_deleted_boards(client, boards)
+        startup = _StartupSchemaCache(client)
+        startup.prefetch(boards)
+        _drop_deleted_boards(startup, boards)
         if not boards:
             raise PushError('INVALID_CONFIGURATION')
         cards = LarkCards(client, boards, catalog)
-        _reconcile(cards.client, catalog, boards)
+        _reconcile(startup, catalog, boards)
         ledger = PostgresLedger(os.environ['DATABASE_URL'])
         ledger.initialize()
     except Exception:
@@ -947,7 +995,7 @@ def register(app):
             if isinstance(config, dict):
                 config = {k: v for k, v in config.items() if k in boards}
             if set(config) != set(boards): raise PushError('INVALID_REVIEW_CONFIGURATION')
-            _reconcile(cards.client, catalog, boards, review_config=config)
+            _reconcile(startup, catalog, boards, review_config=config)
             review = ReviewService(cards, ledger, config)
             for board in boards: review.cfg(board)
             review.validate_schema()
@@ -965,7 +1013,7 @@ def register(app):
                 from address_receiver import AddressService, register_address_routes
                 address_config=json.loads(os.environ['OM_CARD_ADDRESS_CONFIG'])
                 if isinstance(address_config,dict): address_config={k:v for k,v in address_config.items() if k in boards}
-                if isinstance(address_config,dict): _reconcile(cards.client,catalog,boards,review_config=config,address_config=address_config)
+                if isinstance(address_config,dict): _reconcile(startup,catalog,boards,review_config=config,address_config=address_config)
                 if not isinstance(address_config,dict) or not address_config or not set(address_config).issubset(boards):
                     raise PushError('INVALID_ADDRESS_CONFIGURATION')
                 address_service=AddressService(review,address_config)
