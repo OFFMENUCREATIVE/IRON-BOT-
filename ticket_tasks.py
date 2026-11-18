@@ -91,6 +91,16 @@ def summary_for(fields, board, po, details='Details'):
     return f'{kind}: {what}' + (f' — {tail}' if tail else '')
 
 
+class AsBot:
+    """The Lark client, but Task API calls (_get/_post) go out as the bot itself.
+    Base reads/writes still use the client's normal methods."""
+    def __init__(self, client, bot_get, bot_post):
+        self._client, self._get, self._post = client, bot_get, bot_post
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
 class TicketTasks:
     def __init__(self, client, base=BASE, notify=True):
         self.client, self.base, self.notify = client, base, notify

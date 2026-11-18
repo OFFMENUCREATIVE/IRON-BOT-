@@ -192,3 +192,15 @@ class SharedTableTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AsBotTests(unittest.TestCase):
+    def test_task_calls_use_bot_token_base_calls_unchanged(self):
+        from ticket_tasks import AsBot
+        lark = SharedLark(SharedTableTests().rows())
+        calls = []
+        bot_post = lambda path, body=None, params=None: calls.append(path) or FakeLark._post(lark, path, body, params)
+        bot_get = lambda path, params=None: calls.append(path) or FakeLark._get(lark, path, params)
+        TicketTasks(AsBot(lark, bot_get, bot_post)).run_once()
+        self.assertEqual(calls, ['/open-apis/task/v2/tasks'])
+        self.assertEqual(lark.updates[-1], ('recT', {'Lark Task ID': 'task1'}))

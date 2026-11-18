@@ -110,7 +110,9 @@ if _MCP_URL and _MCP_TOKEN:
             "/im/v1/messages" in p or "/im/v1/images" in p or "/im/v1/files" in p)
 
     # Lark auth error codes meaning the access token is expired/invalid.
-    _USER_TOKEN_ERROR_CODES = {99991661, 99991663, 99991668, 99991677}
+    # 99991679 = the user's login lacks a permission (e.g. Tasks): the bot's own
+    # token may have it, so fall back instead of failing.
+    _USER_TOKEN_ERROR_CODES = {99991661, 99991663, 99991668, 99991677, 99991679}
 
     def _proxy_call(method, path, params=None, body=None):
         p = path or ""
@@ -3234,7 +3236,9 @@ def _start_background_tasks():
     if os.environ.get("OM_TICKET_TASKS_ENABLED", "true").lower() != "false":
         try:
             import ticket_tasks
-            threading.Thread(target=ticket_tasks.loop, args=(lark,), daemon=True).start()
+            # Lark Tasks are created as Iron Bot (its own token), not via the act-as-user proxy.
+            threading.Thread(target=ticket_tasks.loop, args=(ticket_tasks.AsBot(lark, _BOT_GET, _BOT_POST),),
+                             daemon=True).start()
             logger.info("Ticket tasks loop started")
         except Exception as e:
             logger.error(f"Ticket tasks loop not started: {e}")
