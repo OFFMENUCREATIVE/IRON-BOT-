@@ -18,6 +18,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import urlencode
@@ -28,13 +29,14 @@ log = logging.getLogger(__name__)
 STATUS_FIELD = 'Status'
 STARTING_STATUS = 'Pending Artwork'
 ORDER_TYPE_FIELD = 'Order Type'
+IN_HAND_FIELD = 'In-Hand Date'
 
 # What the sender chose to put on the card, per line (NetSuite "Send POs to Lark").
 # address: auto = PO ship-to, else SO ship-to (the old behaviour)
 #          so / po = only that address; om = Off Menu's own address; none = no address
 ADDRESS_CHOICES = ('auto', 'so', 'po', 'om', 'none')
 PUSH_DEFAULTS = {'address': 'auto', 'sizes': True, 'description': True, 'units': True,
-                 'status': STARTING_STATUS, 'orderType': ''}
+                 'status': STARTING_STATUS, 'orderType': '', 'inHandDate': ''}
 OM_SHIP_TO_DEFAULT = 'Off Menu\n3495 N Dixie Highway\nBoca Raton, FL 33431'
 
 
@@ -58,6 +60,9 @@ def push_options(line):
     for k in ('status', 'orderType'):
         if not isinstance(opts[k], str) or len(opts[k]) > 60 or not re.fullmatch(r"[\w &'/().,-]*", opts[k]):
             raise PushError('INVALID_PUSH_OPTIONS')
+    # In-hand date: '' (leave blank) or YYYY-MM-DD from the sales order / send page.
+    if not isinstance(opts['inHandDate'], str) or (opts['inHandDate'] and not _valid_date(opts['inHandDate'])):
+        raise PushError('INVALID_PUSH_OPTIONS')
     if not opts['status']:
         opts['status'] = STARTING_STATUS
     # 'none' = the sender chose to leave the dropdown blank on the card.
@@ -68,6 +73,20 @@ def push_options(line):
 
 class PushError(Exception):
     pass
+
+
+def _valid_date(text):
+    try:
+        datetime.strptime(text, '%Y-%m-%d')
+        return re.fullmatch(r'\d{4}-\d{2}-\d{2}', text) is not None
+    except ValueError:
+        return False
+
+
+def date_ms(text):
+    """Lark date value for YYYY-MM-DD: noon UTC, so it shows as that day in any US/Asia timezone."""
+    d = datetime.strptime(text, '%Y-%m-%d').replace(hour=12, tzinfo=timezone.utc)
+    return int(d.timestamp() * 1000)
 
 
 def authenticate(raw, timestamp, signature, secret, now=None, *, allow_short_key=False):
@@ -389,7 +408,24 @@ class LarkCards:
                 fields[name] = value
             else:
                 notes.append(f'{name} "{value}" is not on this board')
+        if opts.get('inHandDate'):
+            kind = self.field_type(board, IN_HAND_FIELD)
+            if kind == 5:
+                fields[IN_HAND_FIELD] = date_ms(opts['inHandDate'])
+            elif kind is not None:
+                notes.append(f'{IN_HAND_FIELD} not set (no date column on this board)')
         return fields, notes, unchecked
+
+    def field_type(self, board, name):
+        """Lark type code of a column; 0 when the board has no such column, None when unreadable."""
+        b = self.boards[board]
+        try:
+            fields = self.client.list_fields(b['table'], app_token=b['base']) or []
+        except Exception:
+            return None
+        if not fields:
+            return None
+        return next((x.get('type') for x in fields if x.get('field_name') == name), 0)
 
     def product_field(self, board):
         """Card title column. Renamed in Lark from "Products" to "Product Name";
@@ -553,6 +589,7 @@ class LarkCards:
         result['sizes'] = self.add_sizes(board, result['record_id'], line) if opts['sizes'] else ''
         result['cardStatus'] = fields.get(STATUS_FIELD, '')
         result['orderType'] = fields.get(ORDER_TYPE_FIELD, '')
+        result['inHandDate'] = opts['inHandDate'] if IN_HAND_FIELD in fields else ''
         result['notes'] = notes
         return result
 
@@ -716,7 +753,7 @@ def process(line, ledger, cards):
 def dropdown_report(result):
     """What the send page shows for Status / Order Type on a new card."""
     return {'cardStatus': result.get('cardStatus', ''), 'orderType': result.get('orderType', ''),
-            'notes': list(result.get('notes') or [])}
+            'inHandDate': result.get('inHandDate', ''), 'notes': list(result.get('notes') or [])}
 
 
 def validate_status_payload(payload, account):

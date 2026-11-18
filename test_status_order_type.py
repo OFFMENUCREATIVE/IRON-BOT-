@@ -99,3 +99,27 @@ class BoardOrderTests(unittest.TestCase):
         reg.review_config = {k: {} for k in reg.boards}
         reg.order = {'tblA': 0, 'tblB': 1, 'tblZ': 2}
         self.assertEqual([r['label'] for r in reg.listing()], ['Workshop Samples', 'Workshop Bulk', 'Alpha', 'Brand New'])
+
+
+DATE_FIELDS = FIELDS + [{'field_name': 'In-Hand Date', 'type': 5}]
+
+
+class InHandDateTests(unittest.TestCase):
+    def test_date_goes_on_card(self):
+        c = Client(DATE_FIELDS); result = cards(c).create('test', line(inHandDate='2026-12-05'))
+        from datetime import datetime, timezone
+        ms = c.created[0]['In-Hand Date']
+        self.assertEqual(datetime.fromtimestamp(ms / 1000, timezone.utc).strftime('%Y-%m-%d'), '2026-12-05')
+        self.assertEqual(result['inHandDate'], '2026-12-05')
+
+    def test_blank_date_leaves_card_blank(self):
+        c = Client(DATE_FIELDS); cards(c).create('test', line())
+        self.assertNotIn('In-Hand Date', c.created[0])
+
+    def test_board_without_date_column(self):
+        c = Client(); result = cards(c).create('test', line(inHandDate='2026-12-05'))
+        self.assertNotIn('In-Hand Date', c.created[0]); self.assertIn('In-Hand Date', result['notes'][0])
+
+    def test_bad_dates_rejected(self):
+        for bad in ('12/05/2026', '2026-13-01', '2026-02-30', 20261205, '2026-12-05T00:00'):
+            with self.assertRaises(PushError): push_options(line(inHandDate=bad))
