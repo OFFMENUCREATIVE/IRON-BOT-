@@ -3279,6 +3279,11 @@ register_netsuite_card_push(app)
 from off_menu_units_sync import register as register_off_menu_units_sync
 register_off_menu_units_sync(app)
 
+# Shipments with tracking move their card to Shipped / Part Shipped and fill
+# Tracking Number, Carrier, Date Shipped and Shipment Method on the card.
+from shipped_status_sync import register as register_shipped_status_sync
+register_shipped_status_sync(app)
+
 
 if __name__ == "__main__":
     _start_background_tasks()
