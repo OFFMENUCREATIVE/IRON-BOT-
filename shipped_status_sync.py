@@ -244,7 +244,7 @@ def register(app=None):
     try:
         from lark_client import LarkClient
         sync = ShippedSync(LarkClient(), dry_run=os.environ.get('SHIPPED_SYNC_DRY_RUN') == 'true')
-        sync.start(interval=int(os.environ.get('SHIPPED_SYNC_INTERVAL', '300')))
+        sync.start(interval=int(os.environ.get('SHIPPED_SYNC_INTERVAL', '900')))
         log.info('SHIPPED_SYNC: started')
         return sync
     except Exception as e:

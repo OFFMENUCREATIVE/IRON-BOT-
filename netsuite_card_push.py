@@ -1020,7 +1020,7 @@ def register(app):
         try:
             from netsuite_card_fill import CardFiller
             CardFiller(cards, os.environ.get('NETSUITE_ACCOUNT_ID', '')).start(
-                interval=int(os.environ.get('OM_CARD_FILL_INTERVAL', '60')))
+                interval=int(os.environ.get('OM_CARD_FILL_INTERVAL', '120')))
         except Exception:
             app.logger.error('Card fill disabled: setup failed')
 
