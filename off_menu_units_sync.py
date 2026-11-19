@@ -42,9 +42,6 @@ NUMBER, LINK, DUPLEX, ATTACHMENT, TEXT, DATE = 2, 18, 21, 17, 1, 5
 PRODUCTION_STATUS = 'Production'
 PRODUCTION_STARTED = 'Production Started'  # stamped the first time a card's Status is Production
 STAMP_PRODUCTION = os.environ.get('OM_UNITS_STAMP_PRODUCTION', 'true') == 'true'
-ADDRESS_FIELDS = ('Shipping Address', 'Address')  # card field the NetSuite address is copied into
-SPLIT_MARK = '— SPLIT SHIPMENT —'
-SPLIT_ADDRESS_ENABLED = os.environ.get('OM_UNITS_SPLIT_ADDRESS', 'true') == 'true'
 QTY_FIELD = 'Off Menu Qty'  # same name on the boards and on the master list
 KEY_FIELD = 'Source Card ID'
 RATE_LIMITED = 1254290
@@ -102,20 +99,6 @@ def attachments(value):
             if isinstance(a, dict) and a.get('file_token')]
 
 
-def base_address(value):
-    """The card address without any split-shipment block this sync added."""
-    raw = text(value).replace('\r\n', '\n')
-    return raw.split(SPLIT_MARK, 1)[0].rstrip()
-
-
-def split_address(value, om_qty, client_qty=None):
-    """NetSuite address plus a block naming the Off Menu share of a split shipment."""
-    base = base_address(value)
-    client = f'CLIENT: {client_qty} units → address above' if client_qty else 'CLIENT: rest of the order → address above'
-    block = f'{SPLIT_MARK}\n{client}\nOFF MENU: {om_qty} units → {SHIP_TO}'
-    return f'{base}\n\n{block}' if base else block
-
-
 def first(fields, names):
     for name in names:
         value = fields.get(name)
@@ -132,7 +115,6 @@ class UnitsSync:
     def __init__(self, client, base=BASE, master=MASTER_TABLE, po_table=MASTER_PO_TABLE):
         self.client, self.base, self.master, self.po_table = client, base, master, po_table
         self._boards, self._boards_at = [], 0
-        self._pending_addresses = []
 
     @staticmethod
     def today_ms():
@@ -207,57 +189,7 @@ class UnitsSync:
             if qty(f.get(QTY_FIELD)) <= 0:
                 continue
             out[f"{board['table']}:{row['record_id']}"] = self.row_fields(board, row['record_id'], f)
-        if SPLIT_ADDRESS_ENABLED:
-            self._pending_addresses.extend(self.address_updates(board, rows))
         return out
-
-    # -- split shipments: the card's Shipping Address also names the Off Menu share
-    @staticmethod
-    def address_field(board):
-        for name in ADDRESS_FIELDS:
-            if (board['fields'].get(name) or {}).get('type') == TEXT:
-                return name
-        return None
-
-    def address_updates(self, board, rows):
-        """(table, record, field, new text) for cards whose split block is missing, stale or no longer wanted."""
-        field = self.address_field(board)
-        if not field:
-            return []
-        updates, seen = [], set()
-        for row in rows:
-            f = row.get('fields') or {}
-            om = qty(f.get(QTY_FIELD))
-            if om <= 0:
-                continue
-            seen.add(row['record_id'])
-            client = qty(f.get('Client Qty'))
-            wanted = split_address(f.get(field), om, client if client > 0 else None)
-            if text(f.get(field)).replace('\r\n', '\n') != wanted:
-                updates.append((board['table'], row['record_id'], field, wanted))
-        # cards that no longer split: take the block back out
-        body = {'filter': {'conjunction': 'and', 'conditions': [
-            {'field_name': field, 'operator': 'contains', 'value': [SPLIT_MARK]}]}}
-        try:
-            marked = self._paged(f"/tables/{board['table']}/records/search", body=body)
-        except RuntimeError as e:
-            log.warning('UNITS_SYNC: cannot look for old split addresses on %s: %s', board['name'], e)
-            marked = []
-        for row in marked:
-            f = row.get('fields') or {}
-            if row['record_id'] in seen or qty(f.get(QTY_FIELD)) > 0 or SPLIT_MARK not in text(f.get(field)):
-                continue
-            updates.append((board['table'], row['record_id'], field, base_address(f.get(field))))
-        return updates
-
-    def apply_addresses(self, stats):
-        for table, record_id, field, value in self._pending_addresses:
-            try:
-                self._api('put', f'/tables/{table}/records/{record_id}', body={'fields': {field: value}})
-                stats['addresses'] += 1
-            except Exception as e:
-                stats['errors'] += 1
-                log.warning('UNITS_SYNC: could not update split address on %s:%s: %s', table, record_id, e)
 
     # -- Production Started: stamp today the first time Status is Production
     def production_cards(self, board):
@@ -385,9 +317,8 @@ class UnitsSync:
     # -- one pass
     def run_once(self):
         stats = {'boards': 0, 'created': 0, 'updated': 0, 'removed': 0, 'flagged': 0, 'duplicates': 0,
-                 'addresses': 0, 'production': 0, 'errors': 0}
+                 'production': 0, 'errors': 0}
         wanted, readable = {}, set()
-        self._pending_addresses = []
         for board in self.boards():
             try:
                 wanted.update(self.requests(board))
@@ -396,7 +327,6 @@ class UnitsSync:
             except Exception as e:
                 stats['errors'] += 1
                 log.warning('UNITS_SYNC: skipping board %s this cycle: %s', board['name'], e)
-        self.apply_addresses(stats)
         if STAMP_PRODUCTION:
             self.stamp_production(stats)
         existing = self.master_rows()
