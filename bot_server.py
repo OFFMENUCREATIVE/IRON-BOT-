@@ -112,7 +112,14 @@ if _MCP_URL and _MCP_TOKEN:
     # Lark auth error codes meaning the access token is expired/invalid.
     _USER_TOKEN_ERROR_CODES = {99991661, 99991663, 99991668, 99991677}
 
+    # When the user's login is rejected, skip the proxy for a while instead of
+    # trying (and failing) on every single call, which doubled Lark traffic.
+    _proxy_off_until = [0.0]
+    _PROXY_PAUSE = int(os.environ.get("LARK_PROXY_PAUSE_SECONDS", "1800"))
+
     def _proxy_call(method, path, params=None, body=None):
+        if time.time() < _proxy_off_until[0]:
+            raise RuntimeError("proxy paused (user login rejected earlier)")
         p = path or ""
         if p.startswith("/open-apis/"):
             p = p[len("/open-apis/"):]
@@ -136,7 +143,9 @@ if _MCP_URL and _MCP_TOKEN:
         # reports this inside a normal-looking reply, so raise here to make the
         # caller fall back to the bot's own token instead of failing every call.
         if isinstance(data, dict) and data.get("code") in _USER_TOKEN_ERROR_CODES:
-            raise RuntimeError(f"proxy user token rejected by Lark (code {data.get('code')})")
+            _proxy_off_until[0] = time.time() + _PROXY_PAUSE
+            raise RuntimeError(f"proxy user token rejected by Lark (code {data.get('code')}); "
+                               f"using bot token for {_PROXY_PAUSE // 60} min")
         return data
 
     def _get_as_user(path, params=None, **k):
@@ -1859,7 +1868,7 @@ def check_new_comments():
                 if not cid or _is_comment_seen(cid):
                     continue
                 user_name = comment.get("user_name", "Unknown")
-                if user_name.lower() not in ("hannah", "lucy"):
+                if user_name.lower().split(" ")[0] not in ("hannah", "lucy"):
                     _mark_comment_seen(cid, table_id, record_id)
                     continue
                 _mark_comment_seen(cid, table_id, record_id)
@@ -3047,11 +3056,14 @@ COMMENT_POLL_INTERVAL = int(os.environ.get("COMMENT_POLL_INTERVAL", "300"))
 def _comment_poll_loop():
     time.sleep(30)
     while True:
-        try:
-            logger.info("Comment poll loop: starting check...")
-            check_new_comments()
-        except Exception as e:
-            logger.error(f"Comment poll loop error: {e}")
+        # Comment alerts read every card's comments in every table (thousands of
+        # Lark calls per run) and never matched anyone, so they're off unless
+        # OM_COMMENT_ALERTS_ENABLED=true.
+        if os.environ.get("OM_COMMENT_ALERTS_ENABLED", "").lower() in ("1", "true", "yes"):
+            try:
+                check_new_comments()
+            except Exception as e:
+                logger.error(f"Comment poll loop error: {e}")
         # Also poll for Project Update Request cards to add Mark Resolved buttons
         try:
             _poll_update_request_cards()

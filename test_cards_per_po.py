@@ -48,3 +48,16 @@ class SingleSizeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NumberSizeTests(unittest.TestCase):
+    def test_ring_sizes_with_colons_split_into_rows(self):
+        from netsuite_card_push import parse_sizes
+        self.assertEqual(parse_sizes('7: 23 8: 23 9: 17 10: 17 11: 10 12: 10'),
+                         ([('7', 23), ('8', 23), ('9', 17), ('10', 17), ('11', 10), ('12', 10)], []))
+        self.assertEqual(parse_sizes('7.5=10 8=12'), ([('7.5', 10), ('8', 12)], []))
+
+    def test_other_formats_unchanged(self):
+        from netsuite_card_push import parse_sizes
+        self.assertEqual(parse_sizes('S-15 M-30 L-20'), ([('S', 15), ('M', 30), ('L', 20)], []))
+        self.assertEqual(parse_sizes('10'), ([], ['10']))

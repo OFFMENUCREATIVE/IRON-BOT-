@@ -395,7 +395,7 @@ def register(app=None):
     try:
         from lark_client import LarkClient
         sync = UnitsSync(LarkClient())
-        sync.start(interval=int(os.environ.get('OM_UNITS_SYNC_INTERVAL', '300')))
+        sync.start(interval=int(os.environ.get('OM_UNITS_SYNC_INTERVAL', '900')))
         log.info('UNITS_SYNC: started')
         return sync
     except Exception as e:
