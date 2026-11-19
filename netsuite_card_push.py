@@ -226,6 +226,8 @@ def starting_name_and_description(line):
 
 
 SIZE_PAIR = r'([A-Za-z0-9/.]*[A-Za-z])\s*[:=\-×]?\s*(\d+)'
+# Number sizes (rings, shoes) need an explicit ':' or '=' ("7: 23 8: 23", "7.5=10").
+NUMBER_SIZE_PAIR = r'(\d+(?:\.\d+)?)\s*[:=]\s*(\d+)'
 
 
 def parse_sizes(text):
@@ -242,6 +244,10 @@ def parse_sizes(text):
         # Several sizes in one chunk with only spaces between them ("S-15 M-30 L-20").
         # Only when every piece is a one-word size followed by its number.
         pairs = re.findall(SIZE_PAIR, chunk)
+        if len(pairs) < 2 and re.fullmatch(rf'(?:{NUMBER_SIZE_PAIR}\s*){{2,}}', chunk):
+            pairs = re.findall(NUMBER_SIZE_PAIR, chunk)
+            rows.extend((size[:40], int(qty)) for size, qty in pairs)
+            continue
         if len(pairs) > 1 and re.fullmatch(rf'(?:{SIZE_PAIR}\s*)+', chunk):
             rows.extend((size[:40], int(qty)) for size, qty in pairs)
             continue
