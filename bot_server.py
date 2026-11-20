@@ -154,7 +154,8 @@ if _MCP_URL and _MCP_TOKEN:
         try:
             return _proxy_call("GET", path, params=params)
         except Exception as _e:  # noqa: BLE001 - resilience fallback
-            logger.warning("act-as-user GET proxy failed (%s); using bot token", _e)
+            if "proxy paused" not in str(_e):
+                logger.warning("act-as-user GET proxy failed (%s); using bot token", _e)
             return _orig_get(path, params, **k)
 
     def _post_as_user(path, body=None, **k):
@@ -163,14 +164,16 @@ if _MCP_URL and _MCP_TOKEN:
         try:
             return _proxy_call("POST", path, body=body)
         except Exception as _e:  # noqa: BLE001
-            logger.warning("act-as-user POST proxy failed (%s); using bot token", _e)
+            if "proxy paused" not in str(_e):
+                logger.warning("act-as-user POST proxy failed (%s); using bot token", _e)
             return _orig_post(path, body, **k)
 
     def _delete_as_user(path, body=None, **k):
         try:
             return _proxy_call("DELETE", path, body=body)
         except Exception as _e:  # noqa: BLE001
-            logger.warning("act-as-user DELETE proxy failed (%s); using bot token", _e)
+            if "proxy paused" not in str(_e):
+                logger.warning("act-as-user DELETE proxy failed (%s); using bot token", _e)
             return _orig_delete(path, body, **k)
 
     lark._get, lark._post, lark._delete = _get_as_user, _post_as_user, _delete_as_user
